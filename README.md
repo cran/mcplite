@@ -1,0 +1,104 @@
+# mcplite
+
+<!-- badges: start -->
+[![R-CMD-check](https://github.com/tosidata/mcplite/actions/workflows/R-CMD-check.yaml/badge.svg)](https://github.com/tosidata/mcplite/actions/workflows/R-CMD-check.yaml)
+<!-- badges: end -->
+
+`mcplite` lets you expose R functions as [Model Context Protocol](https://modelcontextprotocol.io/)
+(MCP) tools. It runs a small server over standard input and output, which is the
+transport most desktop MCP clients use to launch local tool servers.
+
+Use it when you want an MCP client to call R code such as data lookups,
+calculations, report helpers, or local automation.
+
+## Installation
+
+Install the released version from CRAN:
+
+```r
+install.packages("mcplite")
+```
+
+Install the development version from GitHub:
+
+```r
+pak::pak("tosidata/mcplite")
+```
+
+## Quick start
+
+Save a complete server definition as `server.R`:
+
+```r
+library(mcplite)
+
+add_numbers <- tool(
+  function(x, y) {
+    x + y
+  },
+  name = "add_numbers",
+  description = "Add two numbers and return the result.",
+  arguments = list(
+    x = type_number("First number."),
+    y = type_number("Second number.")
+  )
+)
+
+mcp_server(list(add_numbers))
+```
+
+Configure your MCP client to launch the script. The `command` must resolve to
+the `Rscript` executable. If `Rscript` is not discoverable, run
+`Sys.which("Rscript")` in R and use the returned path as the client's `command`.
+Keep the server script path absolute too. A Claude Desktop-style configuration
+looks like this:
+
+```json
+{
+  "mcpServers": {
+    "r-tools": {
+      "command": "Rscript",
+      "args": [
+        "--vanilla",
+        "/absolute/path/to/server.R"
+      ]
+    }
+  }
+}
+```
+
+Restart the client and check that it discovers `add_numbers`. As a first call,
+ask it to run `add_numbers` with `x = 2` and `y = 3`; the result should be `5`.
+
+`mcp_server()` starts serving immediately and runs until standard input closes,
+so launch it through the MCP client rather than from an interactive R console.
+
+## Results
+
+For most tools, return an ordinary R value. Character values become text, while
+other JSON-serializable values are returned as JSON in a text content block.
+Bare lists are ordinary results, not MCP result objects.
+
+Use `tool_result()` when a tool needs rich content blocks or structured results.
+See `?tool_result` for the result formats and compatibility details.
+
+## Scope
+
+`mcplite` supports local, client-launched stdio tool servers. It does not
+implement HTTP transport or the MCP prompts, resources, and sampling
+capabilities. Tools can still return supported content blocks; content blocks
+are tool results, not implementations of those MCP capabilities.
+
+## ellmer interoperability
+
+Compatible `ellmer::tool()` definitions can be passed directly to
+`mcp_server()`. `ellmer` is optional and is not needed for tools defined with
+`mcplite`.
+
+## Function reference
+
+See `?tool` for tool definitions, `help("tool-types", package = "mcplite")` for
+schema helpers, `?tool_result` and
+`help("content-blocks", package = "mcplite")` for rich results, and
+`?mcp_server` for server behavior, scope, lifecycle, interoperability, and
+tracing details.
