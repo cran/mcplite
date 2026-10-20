@@ -22,7 +22,8 @@ tool(
 \item{...}{Not used. Supply argument schemas with \code{arguments}.}
 
 \item{arguments}{Named list of argument schemas created by the \verb{type_*()}
-helpers.}
+helpers, or one complete direct object-root schema created by
+\code{type_from_schema()}.}
 
 \item{name}{Optional tool name. If omitted, \code{tool()} uses the symbol name
 supplied to \code{fun}; anonymous functions must supply \code{name}. Tool names must
@@ -30,13 +31,14 @@ use 1 to 128 characters from letters, digits, underscore, dot, and hyphen.}
 
 \item{annotations}{Optional named list of MCP tool annotations to advertise.}
 
-\item{output_schema}{Optional object-shaped output schema created by a
-supported \verb{type_*()} helper. Raw schema lists must be wrapped with
-\code{\link[=type_from_schema]{type_from_schema()}}. The schema is advertised to MCP \code{2025-06-18} and
-later clients; tool authors remain responsible for result conformance.}
+\item{output_schema}{Optional output schema created by a supported \verb{type_*()}
+helper. Raw schema lists must be wrapped with \code{\link[=type_from_schema]{type_from_schema()}}. See
+"Complete schemas and structured output" for author responsibilities and
+protocol compatibility.}
 }
 \value{
-A lightweight mcplite tool definition.
+The supplied function with MCP metadata attached. It remains directly
+callable as an R function and can be supplied to \code{\link[=mcp_server]{mcp_server()}}.
 }
 \description{
 \code{tool()} wraps an R function with MCP metadata. The resulting object can be
@@ -44,17 +46,38 @@ supplied directly, or in a list, to \code{\link[=mcp_server]{mcp_server()}}. Ord
 values use the default single-text-block conversion; return \code{\link[=tool_result]{tool_result()}}
 to opt into protocol-native content, structured output, or result metadata.
 }
-\details{
-Character values are returned as literal text, character vectors are joined
-with newlines, and other JSON-serializable R values are encoded as JSON.
-Pre-serialized JSON strings remain text, and bare lists are ordinary values,
-not MCP result objects.
+\section{Arguments and defaults}{
 
-An \code{output_schema} advertises the expected object-shaped
-\code{structured_content} to MCP \code{2025-06-18} and later clients. \code{mcplite} checks
-that the normalized schema has JSON-object wire shape and is serializable,
-but does not perform runtime schema validation.
+Incoming JSON arrays reach \code{fun} as R lists, not atomic vectors. Schemas do
+not coerce or validate argument values or supply R defaults. Marking a
+property \code{required = FALSE} permits omission in the advertised schema; the
+R function must provide its own default for calls that omit that argument.
 }
+
+\section{Return values}{
+
+Ordinary character values become literal text, not parsed JSON. Bare lists
+are ordinary values, not MCP result objects. See
+\link[=mcplite-results]{Return-value mappings} for exact conversions, empty and
+missing values, and payload JSON options. Configure those options before
+constructing results and starting the server.
+}
+
+\section{Complete schemas and structured output}{
+
+\code{arguments} also accepts one complete object-root schema from
+\code{\link[=type_from_schema]{type_from_schema()}}. Complete input schemas must have direct root
+\code{type = "object"}; JSON Schema 2020-12 keywords such as \verb{$schema}, \verb{$defs},
+\verb{$ref}, composition, and conditionals are preserved.
+
+An \code{output_schema} advertises the expected \code{structured_content} shape. A
+client's protocol can omit an incompatible output schema without removing
+the tool; see \code{\link[=mcp_server]{mcp_server()}} under "Protocol compatibility" for the exact
+version rules. \code{mcplite} checks schema container shape and serializability,
+not full schema validity or runtime input/output conformance. Tool authors
+own those guarantees.
+}
+
 \examples{
 add_numbers <- tool(
   function(x, y) {
@@ -67,4 +90,5 @@ add_numbers <- tool(
     y = type_number("Second number.")
   )
 )
+add_numbers(2, 3)
 }

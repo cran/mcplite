@@ -1,6 +1,6 @@
 Package: mcplite
 Title: Lightweight Stdio MCP Server for R
-Version: 0.1.0
+Version: 0.2.0
 Authors@R: c(
     person("Juha", "Itkonen", , "juha@tosidata.com", role = c("aut", "cre", "cph"))
   )
@@ -14,7 +14,7 @@ URL: https://tosidata.github.io/mcplite/,
         https://github.com/tosidata/mcplite
 BugReports: https://github.com/tosidata/mcplite/issues
 Depends: R (>= 4.1.0)
-Imports: jsonlite, nanonext (>= 1.6.0), otel
+Imports: jsonlite (>= 0.9.16), nanonext (>= 1.6.0), otel
 Suggests: ellmer (>= 0.3.0), otelsdk, processx, testthat (>= 3.0.0),
         withr
 Config/testthat/edition: 3
@@ -22,8 +22,8 @@ Encoding: UTF-8
 Config/roxygen2/version: 8.0.0
 Config/Needs/website: pkgdown, rmarkdown
 NeedsCompilation: no
-Packaged: 2026-07-23 20:44:20 UTC; juha
+Packaged: 2026-10-20 09:38:26 UTC; juha
 Author: Juha Itkonen [aut, cre, cph]
 Maintainer: Juha Itkonen <juha@tosidata.com>
 Repository: CRAN
-Date/Publication: 2026-08-03 18:10:13 UTC
+Date/Publication: 2026-10-20 10:20:02 UTC

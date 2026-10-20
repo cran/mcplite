@@ -13,6 +13,14 @@ call_tool <- function(tool, protocol_version = "2025-11-25") {
   )$response
 }
 
+call_modern_tool <- function(tool, state = NULL) {
+  state <- state %||% mcplite:::new_server_state(tool)
+  mcplite:::dispatch_message(
+    modern_tool_call_request(name = "result_tool"),
+    state
+  )$response
+}
+
 test_that("content constructors create validated protocol-native blocks", {
   annotations <- list(
     audience = c("user", "assistant"),
@@ -100,6 +108,84 @@ test_that("content constructors create validated protocol-native blocks", {
   expect_error(mcplite::content_text("x", meta = list(new.env())), "meta")
 })
 
+test_that("annotation standard fields do not consume prefix extensions", {
+  extensions <- list(
+    audience_extension = "system",
+    priority_extension = 2,
+    last_modified_extension = list(source = "custom")
+  )
+
+  for (extension_name in names(extensions)) {
+    annotation <- extensions[extension_name]
+    block <- mcplite::content_text("extension", annotations = annotation)
+    result <- mcplite::tool_result(block)
+
+    expect_identical(
+      block$annotations,
+      annotation,
+      info = extension_name
+    )
+    expect_identical(
+      result$content[[1]]$annotations,
+      annotation,
+      info = extension_name
+    )
+  }
+
+  standard <- mcplite::content_text(
+    "standard",
+    annotations = list(
+      audience = c("user", "assistant"),
+      priority = 0.5,
+      last_modified = "2026-07-18T12:00:00Z"
+    )
+  )
+  expect_identical(
+    standard$annotations,
+    list(
+      audience = list("user", "assistant"),
+      priority = 0.5,
+      last_modified = "2026-07-18T12:00:00Z"
+    )
+  )
+
+  extension_tool <- mcplite::tool(
+    function() {
+      mcplite::tool_result(
+        mcplite::content_text("extension", annotations = extensions)
+      )
+    },
+    name = "result_tool",
+    description = "Return annotation extension fields."
+  )
+  extension_wire <- call_modern_tool(
+    extension_tool
+  )$result$content[[1]]$annotations
+
+  expect_identical(extension_wire, extensions)
+  expect_false(any(
+    c("audience", "priority", "last_modified", "lastModified") %in%
+      names(extension_wire)
+  ))
+
+  standard_tool <- mcplite::tool(
+    function() mcplite::tool_result(standard),
+    name = "result_tool",
+    description = "Return standard annotation fields."
+  )
+  standard_wire <- call_modern_tool(
+    standard_tool
+  )$result$content[[1]]$annotations
+
+  expect_identical(standard_wire[["audience"]], list("user", "assistant"))
+  expect_identical(standard_wire[["priority"]], 0.5)
+  expect_identical(
+    standard_wire[["lastModified"]],
+    "2026-07-18T12:00:00Z"
+  )
+  expect_false("last_modified" %in% names(standard_wire))
+})
+
 test_that("tool_result is the explicit result boundary", {
   text <- mcplite::content_text("hello")
   single <- mcplite::tool_result(text)
@@ -155,24 +241,6 @@ test_that("invalid inherited results are contained at normalization", {
     ),
     class = "mcplite_tool_result"
   )
-  forged_scalar_structured <- structure(
-    list(
-      content = list(mcplite::content_text("scalar structured content")),
-      structured_content = 1,
-      is_error = FALSE,
-      meta = named_list()
-    ),
-    class = "mcplite_tool_result"
-  )
-  forged_array_structured <- structure(
-    list(
-      content = list(mcplite::content_text("array structured content")),
-      structured_content = list(1, 2),
-      is_error = FALSE,
-      meta = named_list()
-    ),
-    class = "mcplite_tool_result"
-  )
   forged_empty_content <- structure(
     list(
       content = list(),
@@ -182,18 +250,13 @@ test_that("invalid inherited results are contained at normalization", {
     ),
     class = "mcplite_tool_result"
   )
-  mutated_result <- mcplite::tool_result(mcplite::content_text("before"))
-  mutated_result$structured_content <- 1
   mutated_block <- mcplite::tool_result(mcplite::content_text("before"))
   mutated_block$content[[1]]$text <- c("not", "scalar")
 
   invalid_results <- list(
     forged_raw_content = forged_raw_content,
     forged_is_error = forged_is_error,
-    forged_scalar_structured = forged_scalar_structured,
-    forged_array_structured = forged_array_structured,
     forged_empty_content = forged_empty_content,
-    mutated_result = mutated_result,
     mutated_block = mutated_block
   )
   invalid_tools <- Map(
@@ -250,40 +313,369 @@ test_that("invalid inherited results are contained at normalization", {
   }
 })
 
-test_that("structured content uses exact fallback rules and object shapes", {
-  structured <- list(
-    ok = TRUE,
-    nested = list(items = list(1L, 2L), object = list(label = "x"))
+test_that("structured content accepts every JSON shape with exact fallback", {
+  values <- list(
+    object = list(ok = TRUE, nested = list(values = list(1L, 2L))),
+    array = list(1L, list(label = "two")),
+    string = "value",
+    number = 2.5,
+    boolean = TRUE,
+    empty_object = named_list(),
+    empty_array = I(list()),
+    json_null = NA
   )
-  fallback <- mcplite::tool_result(structured_content = structured)
+
+  for (value_name in names(values)) {
+    value <- values[[value_name]]
+    result <- mcplite::tool_result(structured_content = value)
+
+    expect_identical(result$structured_content, value, info = value_name)
+    expect_identical(length(result$content), 1L, info = value_name)
+    expect_identical(result$content[[1]]$type, "text", info = value_name)
+    expected_fallback <- as.character(mcplite:::to_json(value))
+    expect_identical(
+      result$content[[1]]$text,
+      expected_fallback,
+      info = value_name
+    )
+    expect_false(
+      inherits(result$content[[1]]$text, "json"),
+      info = value_name
+    )
+  }
+
   explicit <- mcplite::tool_result(
     content = mcplite::content_text("custom"),
-    structured_content = structured,
+    structured_content = list(ok = TRUE),
     is_error = TRUE
   )
-  empty <- mcplite::tool_result(structured_content = list())
-
-  expect_length(fallback$content, 1)
-  expect_identical(fallback$content[[1]]$type, "text")
-  expect_identical(
-    jsonlite::parse_json(fallback$content[[1]]$text, simplifyVector = FALSE),
-    structured
+  absent <- mcplite::tool_result(
+    content = mcplite::content_text("no structured value"),
+    structured_content = NULL
   )
-  expect_length(explicit$content, 1)
+
   expect_identical(explicit$content[[1]]$text, "custom")
   expect_true(explicit$is_error)
-  expect_true(mcplite:::empty_named_list(empty$structured_content))
-  expect_identical(as.character(empty$content[[1]]$text), "{}")
-
-  expect_error(mcplite::tool_result(structured_content = 1), "object")
-  expect_error(
-    mcplite::tool_result(structured_content = list(1, 2)),
-    "object"
-  )
+  expect_null(absent$structured_content)
   expect_error(
     mcplite::tool_result(structured_content = list(bad = new.env())),
     "structured_content"
   )
+})
+
+test_that("structured objects retain jsonlite mappings across protocols", {
+  structured <- list(
+    day = as.Date("2026-07-28"),
+    rows = data.frame(x = 1:2),
+    values = I(1L),
+    label = factor("ready"),
+    timestamp = as.POSIXct("2026-07-28 12:34:56", tz = "UTC"),
+    empty_object = named_list(),
+    empty_array = list(),
+    empty_vector = integer(),
+    empty_rows = data.frame(x = integer()),
+    missing = list(
+      logical = NA,
+      character = NA_character_,
+      integer = NA_integer_,
+      double = NA_real_
+    )
+  )
+  expected_json <- paste0(
+    '{"day":"2026-07-28","rows":[{"x":1},{"x":2}],"values":[1],',
+    '"label":"ready","timestamp":"2026-07-28 12:34:56",',
+    '"empty_object":{},"empty_array":[],"empty_vector":[],"empty_rows":[],',
+    '"missing":{"logical":null,"character":null,"integer":"NA","double":"NA"}}'
+  )
+  expected <- jsonlite::parse_json(expected_json, simplifyVector = FALSE)
+  protocol_versions <- c(
+    "2026-07-28",
+    "2025-11-25",
+    "2025-06-18",
+    "2024-11-05"
+  )
+
+  for (explicit_content in c(FALSE, TRUE)) {
+    result_tool <- mcplite::tool(
+      function() {
+        if (explicit_content) {
+          mcplite::tool_result(
+            content = mcplite::content_text("custom"),
+            structured_content = structured
+          )
+        } else {
+          mcplite::tool_result(structured_content = structured)
+        }
+      },
+      name = "result_tool",
+      description = "Return a named object with existing JSON mappings."
+    )
+
+    for (protocol_version in protocol_versions) {
+      info <- paste(protocol_version, "explicit content:", explicit_content)
+      response <- if (identical(protocol_version, "2026-07-28")) {
+        call_modern_tool(result_tool)
+      } else {
+        call_tool(result_tool, protocol_version)
+      }
+      wire <- jsonlite::parse_json(
+        mcplite:::to_json_response(response),
+        simplifyVector = FALSE
+      )
+
+      expect_null(wire$error, info = info)
+      expect_false(wire$result$isError, info = info)
+      expect_identical(length(wire$result$content), 1L, info = info)
+      expect_identical(wire$result$content[[1]]$type, "text", info = info)
+      expect_identical(
+        wire$result$content[[1]]$text,
+        if (explicit_content) "custom" else expected_json,
+        info = info
+      )
+      if (identical(protocol_version, "2024-11-05")) {
+        expect_false("structuredContent" %in% names(wire$result), info = info)
+      } else {
+        expect_true("structuredContent" %in% names(wire$result), info = info)
+        expect_identical(wire$result$structuredContent, expected, info = info)
+      }
+    }
+  }
+})
+
+test_that("structured values follow serializer mappings across placements", {
+  values <- list(
+    date = as.Date("2026-07-28"),
+    factor = factor("ready"),
+    as_is = I(1L),
+    rows = data.frame(x = 1:2),
+    object = I(named_list(a = 1L)),
+    missing = I(NA_integer_),
+    nan = NaN,
+    infinity = Inf
+  )
+  values$array <- unname(values)
+  expected_json <- c(
+    date = '"2026-07-28"',
+    factor = '"ready"',
+    as_is = "[1]",
+    rows = '[{"x":1},{"x":2}]',
+    object = '{"a":1}',
+    missing = '["NA"]',
+    nan = '"NaN"',
+    infinity = '"Inf"',
+    array = paste0(
+      '["2026-07-28","ready",[1],[{"x":1},{"x":2}],',
+      '{"a":1},["NA"],"NaN","Inf"]'
+    )
+  )
+
+  for (value_name in names(values)) {
+    value <- values[[value_name]]
+    expected <- jsonlite::parse_json(
+      expected_json[[value_name]],
+      simplifyVector = FALSE
+    )
+    result_tool <- mcplite::tool(
+      function() mcplite::tool_result(structured_content = value),
+      name = "result_tool",
+      description = "Return a value using its JSON mapping."
+    )
+    modern <- jsonlite::parse_json(
+      mcplite:::to_json_response(call_modern_tool(result_tool)),
+      simplifyVector = FALSE
+    )
+
+    expect_null(modern$error, info = value_name)
+    expect_false(modern$result$isError, info = value_name)
+    expect_identical(
+      modern$result$structuredContent,
+      expected,
+      info = value_name
+    )
+    expect_identical(
+      modern$result$content[[1]]$text,
+      expected_json[[value_name]],
+      info = value_name
+    )
+
+    if (value_name %in% c("rows", "object")) {
+      for (protocol_version in c("2024-11-05", "2025-06-18", "2025-11-25")) {
+        info <- paste(value_name, protocol_version)
+        legacy <- jsonlite::parse_json(
+          mcplite:::to_json_response(call_tool(result_tool, protocol_version)),
+          simplifyVector = FALSE
+        )
+
+        expect_null(legacy$error, info = info)
+        expect_false(legacy$result$isError, info = info)
+        expect_identical(
+          legacy$result$content[[1]]$text,
+          expected_json[[value_name]],
+          info = info
+        )
+        if (
+          identical(value_name, "object") &&
+            !identical(protocol_version, "2024-11-05")
+        ) {
+          expect_identical(
+            legacy$result$structuredContent,
+            expected,
+            info = info
+          )
+        } else {
+          expect_false(
+            "structuredContent" %in% names(legacy$result),
+            info = info
+          )
+        }
+      }
+    }
+  }
+})
+
+test_that("root scalar NA follows class-specific defaults without coercion", {
+  withr::local_options(list(
+    mcplite.json.null = NULL,
+    mcplite.json.na = NULL,
+    mcplite.json.auto_unbox = NULL
+  ))
+  expected_json <- c(
+    logical = "null",
+    integer = '"NA"',
+    double = '"NA"',
+    character = "null",
+    complex = '"NA"'
+  )
+  values <- list(
+    logical = NA,
+    integer = NA_integer_,
+    double = NA_real_,
+    character = NA_character_,
+    complex = NA_complex_
+  )
+  protocol_versions <- c(
+    "2026-07-28",
+    "2025-11-25",
+    "2025-06-18",
+    "2024-11-05"
+  )
+
+  for (value_name in names(values)) {
+    value <- values[[value_name]]
+    result <- mcplite::tool_result(structured_content = value)
+    expect_identical(result$structured_content, value, info = value_name)
+    expect_identical(
+      result$content[[1]]$text,
+      expected_json[[value_name]],
+      info = value_name
+    )
+
+    result_tool <- mcplite::tool(
+      function() mcplite::tool_result(structured_content = value),
+      name = "result_tool",
+      description = "Return a root scalar NA using its JSON mapping."
+    )
+    for (protocol_version in protocol_versions) {
+      info <- paste(value_name, protocol_version)
+      response <- if (identical(protocol_version, "2026-07-28")) {
+        call_modern_tool(result_tool)
+      } else {
+        call_tool(result_tool, protocol_version)
+      }
+      wire <- jsonlite::parse_json(
+        mcplite:::to_json_response(response),
+        simplifyVector = FALSE
+      )
+
+      expect_null(wire$error, info = info)
+      expect_false(wire$result$isError, info = info)
+      expect_identical(
+        wire$result$content[[1]]$text,
+        expected_json[[value_name]],
+        info = info
+      )
+      if (identical(protocol_version, "2026-07-28")) {
+        expect_true("structuredContent" %in% names(wire$result), info = info)
+        expect_identical(
+          wire$result$structuredContent,
+          jsonlite::parse_json(expected_json[[value_name]]),
+          info = info
+        )
+      } else {
+        expect_false("structuredContent" %in% names(wire$result), info = info)
+      }
+    }
+  }
+})
+
+test_that("root NA matrices retain dimensions and array wire shape", {
+  value <- matrix(NA, nrow = 1L, ncol = 1L)
+  result <- mcplite::tool_result(structured_content = value)
+
+  expect_identical(result$structured_content, value)
+  expect_identical(result$content[[1]]$text, "[[null]]")
+
+  result_tool <- mcplite::tool(
+    function() mcplite::tool_result(structured_content = value),
+    name = "result_tool",
+    description = "Return a one-cell matrix containing logical NA."
+  )
+  wire <- jsonlite::parse_json(
+    mcplite:::to_json_response(call_modern_tool(result_tool)),
+    simplifyVector = FALSE
+  )
+
+  expect_null(wire$error)
+  expect_false(wire$result$isError)
+  expect_identical(wire$result$structuredContent, list(list(NULL)))
+  expect_identical(wire$result$content[[1]]$text, "[[null]]")
+})
+
+test_that("unsupported nested S3 values remain contained tool errors", {
+  result_tool <- mcplite::tool(
+    function() {
+      mcplite::tool_result(
+        structured_content = list(value = structure(1L, class = "unsupported"))
+      )
+    },
+    name = "result_tool",
+    description = "Return an object without a JSON mapping."
+  )
+
+  for (protocol_version in c(
+    "2026-07-28",
+    "2025-11-25",
+    "2025-06-18",
+    "2024-11-05"
+  )) {
+    response <- if (identical(protocol_version, "2026-07-28")) {
+      call_modern_tool(result_tool)
+    } else {
+      call_tool(result_tool, protocol_version)
+    }
+    wire <- jsonlite::parse_json(
+      mcplite:::to_json_response(response),
+      simplifyVector = FALSE
+    )
+
+    expect_null(wire$error, info = protocol_version)
+    expect_true(wire$result$isError, info = protocol_version)
+    expect_false(
+      "structuredContent" %in% names(wire$result),
+      info = protocol_version
+    )
+    expect_identical(length(wire$result$content), 1L, info = protocol_version)
+    expect_identical(
+      wire$result$content[[1]]$type,
+      "text",
+      info = protocol_version
+    )
+    expect_match(
+      wire$result$content[[1]]$text,
+      "structured_content",
+      info = protocol_version
+    )
+  }
 })
 
 test_that("legacy ordinary values retain text conversion behavior", {
@@ -538,7 +930,7 @@ test_that("structured-only results use fallback on old protocols", {
   expect_length(current$content, 1)
 })
 
-test_that("native output schemas require object helpers and are version gated", {
+test_that("object output schemas retain legacy version gating and wire shape", {
   object_schema <- mcplite::type_object(
     ok = mcplite::type_boolean(),
     values = mcplite::type_array(mcplite::type_integer())
@@ -792,37 +1184,270 @@ test_that("native output schemas require object helpers and are version gated", 
     mcplite::tool(
       function() "bad",
       name = "bad",
-      description = "Reject scalar output schema.",
-      output_schema = mcplite::type_string()
-    ),
-    "object"
-  )
-  expect_error(
-    mcplite::tool(
-      function() "bad",
-      name = "bad",
-      description = "Reject array output schema.",
-      output_schema = mcplite::type_array(mcplite::type_string())
-    ),
-    "object"
-  )
-  expect_error(
-    mcplite::tool(
-      function() "bad",
-      name = "bad",
       description = "Reject raw output schema lists.",
       output_schema = list(type = "object")
     ),
     "type helper"
   )
-  expect_error(
-    mcplite::tool(
-      function() "bad",
-      name = "bad",
-      description = "Reject raw scalar schema helpers.",
-      output_schema = mcplite::type_from_schema(list(type = "string"))
-    ),
-    "object"
+})
+
+test_that("output schema shapes project by protocol version", {
+  schemas <- list(
+    object = mcplite::type_object(ok = mcplite::type_boolean()),
+    array = mcplite::type_array(mcplite::type_string()),
+    scalar = mcplite::type_number(),
+    raw = mcplite::type_from_schema(list(
+      `$defs` = list(Value = list(type = "integer")),
+      oneOf = list(
+        list(`$ref` = "#/$defs/Value"),
+        list(type = "null")
+      ),
+      `if` = list(type = "integer"),
+      then = list(minimum = 0L),
+      `else` = list(const = NULL)
+    )),
+    type_prefixed = mcplite::type_from_schema(list(
+      typeExtension = "object",
+      properties = named_list()
+    ))
+  )
+  expected <- lapply(schemas, mcplite:::schema_from_tool_type)
+
+  for (schema_name in names(schemas)) {
+    output_schema <- schemas[[schema_name]]
+    expected_schema <- expected[[schema_name]]
+    result_tool <- mcplite::tool(
+      function() "ok",
+      name = "result_tool",
+      description = "Project an output schema.",
+      output_schema = output_schema
+    )
+
+    modern <- mcplite:::dispatch_message(
+      modern_tools_list_request(),
+      mcplite:::new_server_state(result_tool)
+    )$response$result$tools[[1]]
+    expect_identical(
+      modern$outputSchema,
+      expected_schema,
+      info = schema_name
+    )
+
+    for (protocol_version in mcplite:::legacy_supported_protocol_versions) {
+      state <- initialize_tool_state(result_tool, protocol_version)
+      legacy <- mcplite:::dispatch_message(
+        tools_list_request(),
+        state
+      )$response$result$tools[[1]]
+      legacy_supports_schema <-
+        !identical(protocol_version, "2024-11-05") &&
+        identical(expected_schema[["type"]], "object")
+
+      if (legacy_supports_schema) {
+        expect_identical(
+          legacy$outputSchema,
+          expected_schema,
+          info = paste(schema_name, protocol_version)
+        )
+      } else {
+        expect_null(
+          legacy$outputSchema,
+          info = paste(schema_name, protocol_version)
+        )
+      }
+    }
+  }
+})
+
+test_that("structured JSON values project across every retained protocol", {
+  values <- list(
+    object = list(ok = TRUE),
+    array = list(1L, 2L),
+    one_element_array = list(1L),
+    nested_null = list(value = NA),
+    string = "value",
+    number = 2.5,
+    boolean = TRUE,
+    empty_object = named_list(),
+    empty_array = I(list()),
+    json_null = NA
+  )
+
+  for (value_name in names(values)) {
+    value <- values[[value_name]]
+    expected_fallback <- as.character(mcplite:::to_json(value))
+    result_tool <- local({
+      structured_value <- value
+      mcplite::tool(
+        function() {
+          mcplite::tool_result(structured_content = structured_value)
+        },
+        name = "result_tool",
+        description = "Return one JSON structured value."
+      )
+    })
+
+    modern <- call_modern_tool(result_tool)
+    expect_true(
+      "structuredContent" %in% names(modern$result),
+      info = value_name
+    )
+    expect_identical(
+      modern$result$structuredContent,
+      value,
+      info = value_name
+    )
+    expect_identical(modern$result$resultType, "complete", info = value_name)
+    expect_null(modern$result$ttlMs, info = value_name)
+    expect_null(modern$result$cacheScope, info = value_name)
+    expect_identical(
+      modern$result$content[[1]]$text,
+      expected_fallback,
+      info = value_name
+    )
+
+    modern_wire <- jsonlite::parse_json(
+      mcplite:::to_json_response(modern),
+      simplifyVector = FALSE
+    )
+    expect_true(
+      "structuredContent" %in% names(modern_wire$result),
+      info = value_name
+    )
+    expect_identical(
+      modern_wire[["result"]][["content"]][[1]][["text"]],
+      expected_fallback,
+      info = value_name
+    )
+    if (identical(value_name, "one_element_array")) {
+      expect_identical(modern_wire$result$structuredContent, list(1L))
+    }
+    if (identical(value_name, "nested_null")) {
+      expect_true("value" %in% names(modern_wire$result$structuredContent))
+      expect_null(modern_wire$result$structuredContent$value)
+    }
+    if (identical(value_name, "empty_object")) {
+      expect_true(
+        mcplite:::empty_named_list(modern_wire$result$structuredContent)
+      )
+    }
+    if (identical(value_name, "empty_array")) {
+      expect_identical(modern_wire$result$structuredContent, list())
+    }
+    if (identical(value_name, "json_null")) {
+      expect_null(modern_wire$result$structuredContent)
+    }
+
+    is_object_value <- is.list(value) && !is.null(names(value))
+    for (protocol_version in mcplite:::legacy_supported_protocol_versions) {
+      legacy <- call_tool(result_tool, protocol_version)
+      legacy_supports_value <-
+        !identical(protocol_version, "2024-11-05") && is_object_value
+
+      expect_identical(
+        legacy$result$content[[1]]$text,
+        expected_fallback,
+        info = paste(value_name, protocol_version)
+      )
+      expect_null(
+        legacy$result$resultType,
+        info = paste(value_name, protocol_version)
+      )
+      if (legacy_supports_value) {
+        expect_true(
+          "structuredContent" %in% names(legacy$result),
+          info = paste(value_name, protocol_version)
+        )
+        expect_identical(
+          legacy$result$structuredContent,
+          value,
+          info = paste(value_name, protocol_version)
+        )
+      } else {
+        info <- paste(value_name, protocol_version)
+        expect_false(
+          "structuredContent" %in% names(legacy$result),
+          info = info
+        )
+        legacy_wire <- jsonlite::parse_json(
+          mcplite:::to_json_response(legacy),
+          simplifyVector = FALSE
+        )
+        expect_false(
+          "structuredContent" %in% names(legacy_wire[["result"]]),
+          info = info
+        )
+        expect_identical(
+          legacy_wire[["result"]][["content"]][[1]][["text"]],
+          expected_fallback,
+          info = info
+        )
+      }
+    }
+  }
+})
+
+test_that("real modern tool results are decorated once after normalization", {
+  canonical_state <- new_test_state()
+  canonical_info <- canonical_state$config$server_info
+  reserved_key <- "io.modelcontextprotocol/serverInfo"
+  authored_error <- mcplite::tool(
+    function() {
+      mcplite::tool_result(
+        content = mcplite::content_text("domain error"),
+        structured_content = list(ok = FALSE),
+        is_error = TRUE,
+        meta = named_list(
+          "io.modelcontextprotocol/serverInfo" = list(
+            name = "spoofed",
+            version = "spoofed"
+          ),
+          "com.example/result" = list(kept = TRUE)
+        )
+      )
+    },
+    name = "authored_error",
+    description = "Return an authored tool error."
+  )
+  fallback_tool <- mcplite::tool(
+    function() {
+      structure(
+        list(
+          content = list(mcplite::content_text("invalid")),
+          structured_content = list(bad = new.env()),
+          is_error = FALSE,
+          meta = named_list()
+        ),
+        class = "mcplite_tool_result"
+      )
+    },
+    name = "fallback",
+    description = "Trigger result normalization fallback."
+  )
+  state <- mcplite:::new_server_state(list(authored_error, fallback_tool))
+
+  authored <- mcplite:::dispatch_message(
+    modern_tool_call_request(name = "authored_error"),
+    state
+  )
+  fallback <- mcplite:::dispatch_message(
+    modern_tool_call_request(name = "fallback"),
+    authored$state
+  )
+
+  for (response in list(authored$response, fallback$response)) {
+    expect_identical(response$result$resultType, "complete")
+    expect_true(response$result$isError)
+    expect_identical(response$result$`_meta`[[reserved_key]], canonical_info)
+    expect_null(response$result$ttlMs)
+    expect_null(response$result$cacheScope)
+  }
+  expect_true(
+    authored$response$result$`_meta`[["com.example/result"]]$kept
+  )
+  expect_match(
+    fallback$response$result$content[[1]]$text,
+    "structured_content"
   )
 })
 
@@ -936,4 +1561,282 @@ test_that("ellmer content adaptation is conservative", {
   mixed <- call_tool(mixed_tool)$result
   expect_true(mixed$isError)
   expect_match(mixed$content[[1]]$text, "entirely")
+})
+
+test_that("payload defaults preserve published ordinary and nested mappings", {
+  withr::local_options(list(
+    mcplite.json.null = NULL,
+    mcplite.json.na = NULL,
+    mcplite.json.auto_unbox = NULL
+  ))
+  value <- list(
+    missing = list(
+      logical = NA,
+      character = NA_character_,
+      integer = NA_integer_,
+      double = NA_real_,
+      complex = NA_complex_
+    ),
+    nonfinite = c(NaN, Inf, -Inf),
+    classed = list(
+      date = as.Date(NA_character_),
+      time = as.POSIXct(NA_character_, tz = "UTC"),
+      factor = factor(NA_character_)
+    ),
+    rows = data.frame(
+      id = 1L,
+      logical = NA,
+      integer = NA_integer_,
+      double = NA_real_,
+      character = NA_character_,
+      date = as.Date(NA_character_),
+      time = as.POSIXct(NA_character_, tz = "UTC"),
+      factor = factor(NA_character_)
+    ),
+    null = NULL,
+    object = named_list(),
+    array = list(),
+    vector = c(1, NA_real_),
+    matrix = matrix(NA_integer_, 1),
+    as_is = I(NA_integer_),
+    unboxed = jsonlite::unbox(1L)
+  )
+  expected <- paste0(
+    '{"missing":{"logical":null,"character":null,"integer":"NA",',
+    '"double":"NA","complex":"NA"},"nonfinite":["NaN","Inf","-Inf"],',
+    '"classed":{"date":null,"time":null,"factor":null},"rows":[{"id":1}],',
+    '"null":null,"object":{},"array":[],"vector":[1,"NA"],',
+    '"matrix":[["NA"]],"as_is":["NA"],"unboxed":1}'
+  )
+
+  for (structured in c(FALSE, TRUE)) {
+    result_tool <- mcplite::tool(
+      function() {
+        if (structured) {
+          mcplite::tool_result(structured_content = value)
+        } else {
+          value
+        }
+      },
+      name = "result_tool",
+      description = "Return published JSON mappings."
+    )
+    response <- call_modern_tool(result_tool)
+    wire <- jsonlite::parse_json(mcplite:::to_json_response(response))
+    expect_false(wire$result$isError)
+    expect_identical(wire$result$content[[1]]$text, expected)
+    if (structured) {
+      expect_identical(response$result$structuredContent, value)
+      expect_identical(
+        wire$result$structuredContent,
+        jsonlite::parse_json(expected)
+      )
+    }
+  }
+})
+
+test_that("bare empty structured roots restore the published object convention", {
+  withr::local_options(list(
+    mcplite.json.null = "list",
+    mcplite.json.na = "null",
+    mcplite.json.auto_unbox = FALSE
+  ))
+  canonical <- mcplite::tool_result(structured_content = list())
+  expect_identical(canonical$structured_content, named_list())
+  expect_identical(canonical$content[[1]]$text, "{}")
+  expect_named(
+    canonical,
+    c("content", "structured_content", "is_error", "meta")
+  )
+
+  result_tool <- mcplite::tool(
+    function() canonical,
+    name = "result_tool",
+    description = "Return an empty structured object."
+  )
+  for (version in c("2026-07-28", "2025-11-25", "2025-06-18", "2024-11-05")) {
+    response <- if (version == "2026-07-28") {
+      call_modern_tool(result_tool)
+    } else {
+      call_tool(result_tool, version)
+    }
+    wire_json <- as.character(mcplite:::to_json_response(response))
+    wire <- jsonlite::parse_json(wire_json)
+    expect_false(wire$result$isError, info = version)
+    expect_identical(wire$result$content[[1]]$text, "{}", info = version)
+    if (version == "2024-11-05") {
+      expect_false("structuredContent" %in% names(wire$result))
+    } else {
+      expect_match(wire_json, '"structuredContent":{}', fixed = TRUE)
+    }
+  }
+  expect_identical(
+    mcplite:::tool_value_to_text(list()),
+    structure("[]", class = "json")
+  )
+  nested <- mcplite::tool_result(structured_content = list(array = list()))
+  expect_identical(nested$content[[1]]$text, '{"array":[]}')
+})
+
+test_that("each payload setting controls fallback and actual result encoding", {
+  cases <- list(
+    list(
+      options = list(mcplite.json.na = "null"),
+      value = NA_integer_,
+      json = "null"
+    ),
+    list(
+      options = list(mcplite.json.na = "string"),
+      value = NA,
+      json = '"NA"'
+    ),
+    list(
+      options = list(mcplite.json.auto_unbox = FALSE),
+      value = 1L,
+      json = "[1]"
+    ),
+    list(
+      options = list(mcplite.json.null = "list"),
+      value = list(keep = NULL, one = 1L, nested = list()),
+      json = '{"keep":{},"one":1,"nested":[]}'
+    ),
+    list(
+      options = list(mcplite.json.na = "null"),
+      value = list(
+        numbers = c(1, NA_real_, NaN, Inf, -Inf),
+        rows = data.frame(id = 1L, x = NA_real_)
+      ),
+      json = '{"numbers":[1,null,null,null,null],"rows":[{"id":1,"x":null}]}'
+    ),
+    list(
+      options = list(mcplite.json.na = "string"),
+      value = list(missing = NA, rows = data.frame(x = NA_real_)),
+      json = '{"missing":"NA","rows":[{"x":"NA"}]}'
+    ),
+    list(
+      options = list(mcplite.json.auto_unbox = FALSE),
+      value = list(
+        one = 1L,
+        date = as.Date("2026-07-28"),
+        time = as.POSIXct("2026-07-28 12:34:56", tz = "UTC"),
+        factor = factor("ready"),
+        as_is = I(1L),
+        unboxed = jsonlite::unbox(1L),
+        matrix = matrix(1L, 1)
+      ),
+      json = paste0(
+        '{"one":[1],"date":["2026-07-28"],',
+        '"time":["2026-07-28 12:34:56"],"factor":["ready"],',
+        '"as_is":[1],"unboxed":1,"matrix":[[1]]}'
+      )
+    )
+  )
+  for (case in cases) {
+    settings <- list(
+      mcplite.json.null = NULL,
+      mcplite.json.na = NULL,
+      mcplite.json.auto_unbox = NULL
+    )
+    settings[names(case$options)] <- case$options
+    withr::with_options(settings, {
+      value <- case$value
+      for (structured in c(FALSE, TRUE)) {
+        result_tool <- mcplite::tool(
+          function() {
+            if (structured) {
+              mcplite::tool_result(structured_content = value)
+            } else {
+              value
+            }
+          },
+          name = "result_tool",
+          description = "Return configurable JSON."
+        )
+        response <- call_modern_tool(result_tool)
+        wire <- jsonlite::parse_json(mcplite:::to_json_response(response))
+        expect_false(wire$result$isError)
+        expect_identical(wire$result$content[[1]]$text, case$json)
+        if (structured) {
+          expect_identical(
+            wire$result$structuredContent,
+            jsonlite::parse_json(case$json)
+          )
+          expect_identical(response$result$structuredContent, value)
+        }
+      }
+    })
+  }
+})
+
+test_that("encoded structured shapes project without changing explicit content", {
+  withr::local_options(list(mcplite.json.auto_unbox = FALSE))
+  value <- jsonlite::toJSON(list(n = 1L), auto_unbox = TRUE)
+  expected <- '["{\\"n\\":1}"]'
+  for (explicit in c(FALSE, TRUE)) {
+    result_tool <- mcplite::tool(
+      function() {
+        if (explicit) {
+          mcplite::tool_result(
+            mcplite::content_text(value),
+            structured_content = value
+          )
+        } else {
+          mcplite::tool_result(structured_content = value)
+        }
+      },
+      name = "result_tool",
+      description = "Return JSON as text, not raw JSON."
+    )
+    for (version in c("2026-07-28", "2025-11-25", "2025-06-18", "2024-11-05")) {
+      response <- if (version == "2026-07-28") {
+        call_modern_tool(result_tool)
+      } else {
+        call_tool(result_tool, version)
+      }
+      wire <- jsonlite::parse_json(mcplite:::to_json_response(response))
+      expect_false(wire$result$isError)
+      expect_identical(
+        wire$result$content[[1]]$text,
+        if (explicit) as.character(value) else expected
+      )
+      expect_identical(
+        "structuredContent" %in% names(wire$result),
+        version == "2026-07-28"
+      )
+      if (version == "2026-07-28") {
+        expect_identical(
+          wire$result$structuredContent,
+          list(as.character(value))
+        )
+      }
+    }
+  }
+})
+
+test_that("ordinary NULL and character text bypass even broken payload settings", {
+  withr::local_options(list(
+    mcplite.json.null = "invalid",
+    mcplite.json.na = "invalid",
+    mcplite.json.auto_unbox = NA
+  ))
+  values <- list(NULL, c("one", "two"), structure('{"n":1}', class = "json"))
+  expected <- c("{}", "one\ntwo", '{"n":1}')
+  for (i in seq_along(values)) {
+    result_tool <- mcplite::tool(
+      function() values[[i]],
+      name = "result_tool",
+      description = "Return ordinary text or NULL."
+    )
+    response <- call_modern_tool(result_tool)
+    wire <- jsonlite::parse_json(mcplite:::to_json_response(response))
+    expect_false(wire$result$isError)
+    expect_identical(wire$result$content[[1]]$text, expected[[i]])
+    expect_false("structuredContent" %in% names(wire$result))
+  }
+  result_tool <- mcplite::tool(
+    function() mcplite::tool_result(mcplite::content_text("absent")),
+    name = "result_tool",
+    description = "Omit structured content."
+  )
+  expect_false(call_modern_tool(result_tool)$result$isError)
 })

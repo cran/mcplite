@@ -17,9 +17,11 @@ an ordered list of such blocks. Omitting \code{content} permits automatic text
 fallback generation from \code{structured_content}; explicit \code{content = list()}
 suppresses fallback and is invalid.}
 
-\item{structured_content}{Optional named list representing a JSON object.
-An empty object is allowed. \code{mcplite} does not validate this value against
-a tool's advertised output schema.}
+\item{structured_content}{Optional R value representable as a JSON object,
+array, or scalar. \code{NULL} means absence; a bare empty list at this root
+represents \code{{}}. See \link{mcplite-results} for other mappings and payload
+options. \code{mcplite} checks JSON representability but does not validate
+this value against a tool's advertised output schema.}
 
 \item{is_error}{Whether the result reports a tool error.}
 
@@ -33,15 +35,28 @@ A protocol-native tool result for return from a tool function.
 \code{tool_result()} is the explicit opt-in boundary for returning protocol-native
 MCP results. Its \code{content} must be created with one of the \verb{content_*()}
 constructors; ordinary R values, including bare lists and JSON strings,
-retain the legacy single-text-block conversion used by \code{\link[=tool]{tool()}}.
+retain the single-text-block conversion used by \code{mcplite::tool()}.
 }
-\details{
+\section{Content and fallback}{
+
 When \code{structured_content} is supplied and \code{content} is omitted,
 \code{tool_result()} generates exactly one JSON text fallback block. Explicitly
-supplied content is preserved as-is and no fallback is appended. Structured
-content and tool output schemas are sent only to clients using MCP
-\code{2025-06-18} or later; older clients receive the generated text fallback.
+supplied content is preserved as-is and no fallback is appended. Keep that
+content useful on its own: a client's protocol may omit structured content
+or restrict its shape. See \code{\link[=mcp_server]{mcp_server()}} under "Protocol compatibility".
+
+See \link[=mcplite-results]{Return-value mappings} for exact R-to-JSON mappings and
+payload options. JSON-looking strings and jsonlite \code{json} objects remain
+string values in \code{structured_content}; they are not parsed as raw JSON.
+Tool authors own conformance with any advertised output schema.
 }
+
+\section{Tool errors}{
+
+\code{is_error = TRUE} reports a tool-level error while retaining the normal MCP
+tool-result envelope.
+}
+
 \examples{
 tool_result(content_text("Done."))
 
@@ -55,6 +70,6 @@ tool_result(
 tool_result(structured_content = list(ok = TRUE, count = 2L))
 }
 \seealso{
-\code{\link[=content_text]{content_text()}}, \code{\link[=content_image]{content_image()}}, \code{\link[=content_audio]{content_audio()}},
-\code{\link[=content_resource_link]{content_resource_link()}}, and \code{\link[=content_resource]{content_resource()}}.
+\link{mcplite-results}, \code{\link[=content_text]{content_text()}}, \code{\link[=content_image]{content_image()}},
+\code{\link[=content_audio]{content_audio()}}, \code{\link[=content_resource_link]{content_resource_link()}}, and \code{\link[=content_resource]{content_resource()}}.
 }
